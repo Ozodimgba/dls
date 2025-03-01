@@ -15,7 +15,7 @@ use anchor_syn::{
 #[command(
     name = "dls",
     author = "FX",
-    version = "0.1.1",
+    version = "0.1.2",
     about = "Generate IDL for Anchor programs without workspace"
 )]
 struct Cli {
@@ -31,7 +31,6 @@ struct Cli {
 }
 
 fn main() -> Result<()> {
-
     let cli = Cli::parse();
     
     if cli.verbose {
@@ -56,7 +55,6 @@ fn main() -> Result<()> {
     let source_code = fs::read_to_string(&lib_rs_path)
         .context("Failed to read src/lib.rs")?;
 
-    // Step 4: Extract the program ID
     let program_id = extract_program_id(&source_code)
         .context("Failed to extract program ID")?;
     
@@ -67,16 +65,28 @@ fn main() -> Result<()> {
     let file = syn::parse_file(&source_code)
         .context("Failed to parse Rust source code")?;
     
+    // Find the module with #[program] attribute
     let program_mod = file.items.iter()
         .find_map(|item| {
             if let syn::Item::Mod(item_mod) = item {
-                Some(item_mod.clone())
+                // Check if the module has the #[program] attribute
+                if item_mod.attrs.iter().any(|attr| {
+                    attr.path.is_ident("program")
+                }) {
+                    Some(item_mod.clone())
+                } else {
+                    None
+                }
             } else {
                 None
             }
         })
-        .ok_or_else(|| anyhow!("Could not find program module in file"))?;
+        .ok_or_else(|| anyhow!("Could not find a module with #[program] attribute in file"))?;
     
+    if cli.verbose {
+        println!("Found program module: {}", program_mod.ident);
+    }
+
     let program = program_parser::parse(program_mod)
         .context("Failed to parse Anchor program structure")?;
 
