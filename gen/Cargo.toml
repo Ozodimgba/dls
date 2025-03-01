@@ -1,0 +1,12 @@
+[package]
+name = "dls"
+version = "0.1.0"
+edition = "2021"
+description = "Generate IDL for Anchor programs without initializing a workspace"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/yourusername/anchor-idl-gen"
+
+[dependencies]
+anchor-lang-idl = { version = "0.1.1", features = ["build"] }
+clap = "4.4.0"
+serde_json = "1.0"
