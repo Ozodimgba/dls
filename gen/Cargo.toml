@@ -1,6 +1,6 @@
 [package]
 name = "anchor-dls"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Generate IDL for Anchor programs without initializing a workspace"
 license = "MIT OR Apache-2.0"
@@ -10,20 +10,13 @@ categories = ["command-line-utilities", "development-tools"]
 
 
 [dependencies]
-anchor-lang = "0.29.0"
-anchor-syn = { version = "0.29.0", features = ["idl"] }
+anchor-syn = { version = "0.30.1", features = ["idl-build"] }
 anyhow = "1.0"
-clap = { version = "4.4", features = ["derive"] }
-serde = "1.0"
+serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-syn = { version = "2.0", features = ["full", "parsing"] }
-solana-sdk = "1.17"
-flate2 = "1.0"
-
-[lib]
-name = "anchor_idl_gen"
-path = "src/lib.rs"
+syn = { version = "1.0", features = ["full", "extra-traits", "parsing"] }
+clap = { version = "4.4", features = ["derive"] }
 
 [[bin]]
-name = "anchor-idl-gen"
+name = "anchor-dls"
 path = "src/main.rs"
