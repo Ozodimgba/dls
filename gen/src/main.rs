@@ -1,124 +1,92 @@
-use std::env;
+use anchor_idl_gen::{extract_idl, write_idl, parse_program_id, get_idl_address, generate_typescript};
+use anyhow::{Result, anyhow};
+use clap::{Parser, Subcommand};
 use std::fs;
 use std::path::PathBuf;
-use std::process::{Command as ProcessCommand, exit};
 
-use clap::{Arg, Command};
+#[derive(Parser)]
+#[command(author, version, about = "Anchor IDL Generator")]
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+}
 
-fn main() {
-    // Make sure we have the build feature enabled
-    let matches = Command::new("anchor-idl-gen")
-        .version("0.1.0")
-        .about("Generate IDL for Anchor programs without initializing a workspace")
-        .arg(
-            Arg::new("program-path")
-                .short('p')
-                .long("program-path")
-                .help("Path to the Anchor program")
-                .required(false),
-        )
-        .arg(
-            Arg::new("output")
-                .short('o')
-                .long("output")
-                .help("Output file for the IDL JSON")
-                .required(false),
-        )
-        .arg(
-            Arg::new("no-docs")
-                .long("no-docs")
-                .help("Skip generating docs in the IDL")
-                .action(clap::ArgAction::SetTrue),
-        )
-        .get_matches();
-
-    // Get program path
-    let program_path = match matches.get_one::<String>("program-path") {
-        Some(path) => PathBuf::from(path),
-        None => env::current_dir().expect("Failed to get current directory"),
-    };
-
-    // Validate program path
-    if !program_path.exists() {
-        eprintln!("Error: Program path does not exist: {:?}", program_path);
-        exit(1);
-    }
-
-    // Check if nightly toolchain is installed
-    println!("Checking if nightly toolchain is installed...");
-    let nightly_check = ProcessCommand::new("rustup")
-        .args(["toolchain", "list"])
-        .output();
+#[derive(Subcommand)]
+enum Commands {
+    /// Extract IDL from an Anchor program
+    Extract {
+        /// Path to the program source directory or entry file
+        #[arg(short, long)]
+        program: PathBuf,
         
-    if let Ok(output) = nightly_check {
-        let output_str = String::from_utf8_lossy(&output.stdout);
-        if !output_str.contains("nightly") {
-            println!("Nightly toolchain not found, installing...");
-            let _ = ProcessCommand::new("rustup")
-                .args(["toolchain", "install", "nightly"])
-                .status();
-        }
-    }
-
-    println!("Building IDL for program at {:?}", program_path);
-    println!("This may take a moment as we need to compile your program...");
+        /// Output path for the IDL JSON file
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
     
-    // Use the build_idl function directly to avoid module path issues
-    #[allow(deprecated)]
-    let idl = match anchor_lang_idl::build::build_idl(
-        &program_path,
-        true, // resolution
-        false, // skip_lint
-        matches.get_flag("no-docs"),
-    ) {
-        Ok(idl) => idl,
-        Err(err) => {
-            eprintln!("Error building IDL: {}", err);
-            eprintln!("Make sure your program builds correctly with 'cargo build-sbf'");
-            eprintln!("Also ensure you have the nightly Rust toolchain installed");
-            exit(1);
-        }
-    };
+    /// Get IDL account address for a program
+    IdlAddress {
+        /// Program ID (base58 encoded)
+        #[arg(short, long)]
+        program_id: String,
+    },
+    
+    /// Generate TypeScript interfaces from an IDL
+    GenerateTs {
+        /// Path to the IDL JSON file
+        #[arg(short, long)]
+        idl: PathBuf,
+        
+        /// Output path for the TypeScript file
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
+}
 
-    // Serialize to JSON
-    let json = match serde_json::to_string_pretty(&idl) {
-        Ok(json) => json,
-        Err(err) => {
-            eprintln!("Error serializing IDL to JSON: {}", err);
-            exit(1);
-        }
-    };
-
-    // Output file path
-    let output_file = match matches.get_one::<String>("output") {
-        Some(path) => PathBuf::from(path),
-        None => {
-            let program_name = &idl.metadata.name;
-            program_path.join(format!("{}.json", program_name))
-        }
-    };
-
-    // Create parent directory if it doesn't exist
-    if let Some(parent) = output_file.parent() {
-        if !parent.exists() {
-            fs::create_dir_all(parent).expect("Failed to create output directory");
-        }
-    }
-
-    // Write to file
-    match fs::write(&output_file, json) {
-        Ok(_) => {
-            println!("✅ IDL successfully generated!");
-            println!("IDL written to {:?}", output_file);
-            println!("Program name: {}", idl.metadata.name);
-            println!("Program version: {}", idl.metadata.version);
-            println!("Instructions: {}", idl.instructions.len());
-            println!("Accounts: {}", idl.accounts.len());
-            println!("Types: {}", idl.types.len());
+fn main() -> Result<()> {
+    let cli = Cli::parse();
+    
+    match cli.command {
+        Commands::Extract { program, output } => {
+            println!("Extracting IDL from program at {:?}", program);
+            
+            let idl = extract_idl(&program)?;
+            println!("Successfully extracted IDL for program: {}", idl.name);
+            
+            if let Some(output_path) = output {
+                write_idl(&idl, &output_path)?;
+                println!("IDL written to: {:?}", output_path);
+            } else {
+                let json = serde_json::to_string_pretty(&idl)?;
+                println!("{}", json);
+            }
         },
-        Err(err) => {
-            eprintln!("Error writing IDL to file: {}", err);
-            exit(1);
+        
+        Commands::IdlAddress { program_id } => {
+            let pubkey = parse_program_id(&program_id)?;
+            let idl_address = get_idl_address(&pubkey);
+            println!("Program ID: {}", program_id);
+            println!("IDL Account Address: {}", idl_address);
+        },
+        
+        Commands::GenerateTs { idl, output } => {
+            if !idl.exists() {
+                return Err(anyhow!("IDL file does not exist: {:?}", idl));
+            }
+            
+            let idl_content = fs::read_to_string(&idl)?;
+            let parsed_idl: anchor_syn::idl::types::Idl = serde_json::from_str(&idl_content)?;
+            
+            let typescript = generate_typescript(&parsed_idl);
+            
+            if let Some(output_path) = output {
+                fs::write(&output_path, typescript)?;
+                println!("TypeScript interfaces written to: {:?}", output_path);
+            } else {
+                println!("{}", typescript);
+            }
         }
     }
+    
+    Ok(())
 }
