@@ -1,5 +1,5 @@
 [package]
-name = "dls"
+name = "anchor-dls"
 version = "0.1.0"
 edition = "2021"
 description = "Generate IDL for Anchor programs without initializing a workspace"
