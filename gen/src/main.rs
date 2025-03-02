@@ -3,6 +3,9 @@ use std::path::{Path, PathBuf};
 use std::io::Write;
 use anyhow::{Context, Result, anyhow};
 use clap::Parser;
+use std::fmt::Write as FmtWrite;
+use std::collections::HashSet;
+use syn::__private::ToTokens; // Add this import for the ToTokens trait
 
 // Directly use the private modules from anchor-syn that we need
 use anchor_syn::{
@@ -15,7 +18,7 @@ use anchor_syn::{
 #[command(
     name = "dls",
     author = "FX",
-    version = "0.1.2",
+    version = "0.1.3",
     about = "Generate IDL for Anchor programs without workspace"
 )]
 struct Cli {
@@ -139,6 +142,7 @@ fn extract_program_id(source_code: &str) -> Result<String> {
     Ok(declare_id_line[start..end].to_string())
 }
 
+// Enhanced IDL generator function
 fn generate_idl(program: &Program, program_id: &str) -> Result<String> {
     // Manual IDL generation based on the program structure
     let mut idl = serde_json::json!({
@@ -159,7 +163,7 @@ fn generate_idl(program: &Program, program_id: &str) -> Result<String> {
             "args": ix.args.iter().map(|arg| {
                 serde_json::json!({
                     "name": arg.name.to_string(),
-                    "type": "unknown" // We would need more parsing to get the real type
+                    "type": extract_type_from_arg(&arg.raw_arg.ty)
                 })
             }).collect::<Vec<_>>()
         })
@@ -167,10 +171,163 @@ fn generate_idl(program: &Program, program_id: &str) -> Result<String> {
     
     idl["instructions"] = serde_json::Value::Array(instructions);
     
+    // Try to extract account structures as well
+    let mut accounts_set = HashSet::new();
+    for ix in &program.ixs {
+        accounts_set.insert(ix.anchor_ident.to_string());
+    }
+    
+    // If you have account struct definitions available, you could add them here
+    
     let idl_json = serde_json::to_string_pretty(&idl)
         .context("Failed to serialize IDL to JSON")?;
     
     Ok(idl_json)
+}
+
+// Helper function to extract type information from a Rust type
+fn extract_type_from_arg(ty: &syn::Type) -> String {
+    match ty {
+        syn::Type::Path(type_path) => {
+            let path_string = path_to_string(&type_path.path);
+            
+            // Handle common types
+            match path_string.as_str() {
+                "u8" => "u8".to_string(),
+                "u16" => "u16".to_string(),
+                "u32" => "u32".to_string(),
+                "u64" => "u64".to_string(),
+                "u128" => "u128".to_string(),
+                "i8" => "i8".to_string(),
+                "i16" => "i16".to_string(),
+                "i32" => "i32".to_string(),
+                "i64" => "i64".to_string(),
+                "i128" => "i128".to_string(),
+                "f32" => "f32".to_string(),
+                "f64" => "f64".to_string(),
+                "bool" => "bool".to_string(),
+                "String" | "str" => "string".to_string(),
+                "Pubkey" => "publicKey".to_string(),
+                _ => {
+                    // Check if it's an Option<T>
+                    if path_string.starts_with("Option<") {
+                        if let Some(inner_type) = extract_inner_type(type_path) {
+                            return format!("option<{}>", inner_type);
+                        }
+                    }
+                    
+                    // Check if it's a Vec<T>
+                    if path_string.starts_with("Vec<") {
+                        if let Some(inner_type) = extract_inner_type(type_path) {
+                            return format!("vec<{}>", inner_type);
+                        }
+                    }
+                    
+                    // For other types, we'll just use their path as a string
+                    path_string
+                }
+            }
+        },
+        syn::Type::Reference(type_ref) => {
+            // For references, extract the inner type
+            extract_type_from_arg(&type_ref.elem)
+        },
+        syn::Type::Array(type_array) => {
+            // For arrays like [u8; 32], represent as array<type>
+            let elem_type = extract_type_from_arg(&type_array.elem);
+            let size = match &type_array.len {
+                syn::Expr::Lit(lit) => {
+                    if let syn::Lit::Int(int) = &lit.lit {
+                        int.base10_parse::<usize>().unwrap_or(0).to_string()
+                    } else {
+                        "unknown_size".to_string()
+                    }
+                },
+                _ => "unknown_size".to_string()
+            };
+            format!("array<{}, {}>", elem_type, size)
+        },
+        syn::Type::Tuple(type_tuple) => {
+            let mut tuple_types = Vec::new();
+            for elem in &type_tuple.elems {
+                tuple_types.push(extract_type_from_arg(elem));
+            }
+            format!("tuple<{}>", tuple_types.join(", "))
+        },
+        _ => "unknown".to_string(), // Fallback for other types
+    }
+}
+
+// Helper to extract the inner type from a generic type like Option<T> or Vec<T>
+fn extract_inner_type(type_path: &syn::TypePath) -> Option<String> {
+    if type_path.path.segments.is_empty() {
+        return None;
+    }
+    
+    let last_segment = type_path.path.segments.last().unwrap();
+    
+    if let syn::PathArguments::AngleBracketed(args) = &last_segment.arguments {
+        for arg in &args.args {
+            if let syn::GenericArgument::Type(inner_type) = arg {
+                return Some(extract_type_from_arg(inner_type));
+            }
+        }
+    }
+    
+    None
+}
+
+// Helper to convert a path to a string representation
+fn path_to_string(path: &syn::Path) -> String {
+    let mut result = String::new();
+    
+    for (i, segment) in path.segments.iter().enumerate() {
+        if i > 0 {
+            result.push_str("::");
+        }
+        
+        result.push_str(&segment.ident.to_string());
+        
+        // Handle generic arguments
+        match &segment.arguments {
+            syn::PathArguments::None => {},
+            syn::PathArguments::AngleBracketed(args) => {
+                result.push('<');
+                for (j, arg) in args.args.iter().enumerate() {
+                    if j > 0 {
+                        result.push_str(", ");
+                    }
+                    match arg {
+                        syn::GenericArgument::Type(ty) => {
+                            let _ = write!(result, "{}", extract_type_from_arg(ty));
+                        },
+                        _ => {
+                            let _ = write!(result, "{}", arg.into_token_stream());
+                        }
+                    }
+                }
+                result.push('>');
+            },
+            syn::PathArguments::Parenthesized(args) => {
+                result.push('(');
+                for (j, input) in args.inputs.iter().enumerate() {
+                    if j > 0 {
+                        result.push_str(", ");
+                    }
+                    let _ = write!(result, "{}", extract_type_from_arg(input));
+                }
+                result.push(')');
+                
+                // Handle output type if present
+                if let syn::ReturnType::Type(_, ty) = &args.output {
+                    result.push_str(" -> ");
+                    let _ = write!(result, "{}", extract_type_from_arg(ty));
+                }
+            }
+        }
+    }
+    
+    result
 }
 
 fn write_idl_to_file(output_path: &Path, idl_json: String) -> Result<()> {
