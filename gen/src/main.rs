@@ -12,7 +12,7 @@ use clap::Parser;
 #[command(
     name = "dls",
     author = "FX",
-    version = "0.1.5",
+    version = "0.1.2",
     about = "Generate IDL for Anchor programs without workspace"
 )]
 struct Cli {
@@ -154,13 +154,10 @@ fn prepare_for_idl_build(project_root: &Path) -> Result<()> {
     let cargo_dir = project_root.join(".cargo");
     fs::create_dir_all(&cargo_dir)?;
     
-    // Create a config.toml file with nightly toolchain
+    // Create a config.toml file with correctly formatted configuration
     let config_content = r#"
 [build]
-rustflags = ["--cfg", "feature=\"idl-build\""]
-
-[unstable]
-build-std = ["std", "panic_abort"]
+rustflags = ["--cfg", "feature=\"idl-build\"", "--cfg", "procmacro2_semver_exempt"]
 "#;
     
     let config_path = cargo_dir.join("config.toml");
@@ -170,13 +167,14 @@ build-std = ["std", "panic_abort"]
 }
 
 fn generate_idl(project_root: &Path, verbose: bool) -> Result<()> {
+    // First, make sure nightly is installed
+    install_nightly_toolchain(verbose)?;
+    
     // Set the environment variables needed for IDL generation
     let env_vars = [
         ("RUSTFLAGS", "--cfg procmacro2_semver_exempt"),
-        ("CARGO_ENCODED_RUSTFLAGS", "--cfg%20procmacro2_semver_exempt"),
         ("ANCHOR_IDL_BUILD_RESOLUTION", "TRUE"),
         ("ANCHOR_IDL_BUILD_SKIP_LINT", "TRUE"),
-        ("RUSTUP_TOOLCHAIN", "nightly"),
     ];
     
     // Create the command
@@ -185,8 +183,9 @@ fn generate_idl(project_root: &Path, verbose: bool) -> Result<()> {
     // Set working directory
     command.current_dir(project_root);
     
-    // Set the command
+    // Set the command with nightly toolchain explicitly specified
     command.args([
+        "+nightly",
         "test", 
         "__anchor_private_print_idl", 
         "--features", 
@@ -217,6 +216,35 @@ fn generate_idl(project_root: &Path, verbose: bool) -> Result<()> {
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(anyhow!("IDL generation failed: {}", stderr));
+    }
+    
+    Ok(())
+}
+
+fn install_nightly_toolchain(verbose: bool) -> Result<()> {
+    // Check if nightly is already installed
+    let check_cmd = Command::new("rustup")
+        .args(["toolchain", "list"])
+        .output()
+        .context("Failed to check installed toolchains")?;
+    
+    let output = String::from_utf8_lossy(&check_cmd.stdout);
+    if !output.contains("nightly") {
+        if verbose {
+            println!("Installing nightly toolchain...");
+        }
+        
+        // Install nightly
+        let install_cmd = Command::new("rustup")
+            .args(["toolchain", "install", "nightly", "--profile", "minimal"])
+            .stdout(if verbose { Stdio::inherit() } else { Stdio::null() })
+            .stderr(if verbose { Stdio::inherit() } else { Stdio::null() })
+            .output()
+            .context("Failed to install nightly toolchain")?;
+        
+        if !install_cmd.status.success() {
+            return Err(anyhow!("Failed to install nightly toolchain"));
+        }
     }
     
     Ok(())
