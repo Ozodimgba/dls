@@ -1,22 +1,18 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::io::Write;
+use std::process::{Command, Stdio};
 use anyhow::{Context, Result, anyhow};
 use clap::Parser;
 
-// Directly use the private modules from anchor-syn that we need
-use anchor_syn::{
-    Program,
-    parser::program as program_parser,
-    idl,
-};
-
+// We'll use the same approach that Anchor uses internally
+// to generate IDL files via the compilation process
 
 #[derive(Parser)]
 #[command(
     name = "dls",
     author = "FX",
-    version = "0.1.4",
+    version = "0.1.5",
     about = "Generate IDL for Anchor programs without workspace"
 )]
 struct Cli {
@@ -35,7 +31,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     
     if cli.verbose {
-        println!("IDL Generator using anchor-syn");
+        println!("IDL Generator using anchor build process");
     }
 
     let project_root = match cli.program_path {
@@ -47,15 +43,21 @@ fn main() -> Result<()> {
         println!("Project root: {}", project_root.display());
     }
 
-    let lib_rs_path = project_root.join("src/lib.rs");
+    // Extract program name from Cargo.toml
+    let cargo_toml_path = project_root.join("Cargo.toml");
+    let cargo_toml = fs::read_to_string(&cargo_toml_path)
+        .context("Failed to read Cargo.toml")?;
+    let program_name = extract_program_name(&cargo_toml)
+        .context("Failed to extract program name from Cargo.toml")?;
     
     if cli.verbose {
-        println!("Parsing {}", lib_rs_path.display());
+        println!("Program name: {}", program_name);
     }
 
+    // Extract program ID from lib.rs
+    let lib_rs_path = project_root.join("src/lib.rs");
     let source_code = fs::read_to_string(&lib_rs_path)
         .context("Failed to read src/lib.rs")?;
-
     let program_id = extract_program_id(&source_code)
         .context("Failed to extract program ID")?;
     
@@ -63,91 +65,51 @@ fn main() -> Result<()> {
         println!("Program ID: {}", program_id);
     }
 
-    let file = syn::parse_file(&source_code)
-        .context("Failed to parse Rust source code")?;
-    
-    // Find the module with #[program] attribute
-    let program_mod = file.items.iter()
-        .find_map(|item| {
-            if let syn::Item::Mod(item_mod) = item {
-                // Check if the module has the #[program] attribute
-                if item_mod.attrs.iter().any(|attr| {
-                    attr.path.is_ident("program")
-                }) {
-                    Some(item_mod.clone())
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        })
-        .ok_or_else(|| anyhow!("Could not find a module with #[program] attribute in file"))?;
-    
-    if cli.verbose {
-        println!("Found program module: {}", program_mod.ident);
-    }
+    // Setup temporary Cargo.toml with idl-build feature
+    prepare_for_idl_build(&project_root)?;
 
-    let program = program_parser::parse(program_mod)
-        .context("Failed to parse Anchor program structure")?;
-
+    // Generate the IDL using Anchor's build process
     if cli.verbose {
         println!("Generating IDL...");
     }
     
-    // Use Anchor's IDL generation functionality
-    // We need to create a full IDL structure manually using the parts from anchor-syn
-    let mut idl = serde_json::json!({
-        "version": "0.1.0",
-        "name": program.name.to_string(),
-        "instructions": [],
-        "accounts": [],
-        "events": [],
-        "errors": [],
-        "address": program_id
-    });
-
-    // Generate instructions
-    let instructions: Vec<serde_json::Value> = program.ixs.iter().map(|ix| {
-        let name = ix.ident.to_string();
-        let accounts = ix.anchor_ident.to_string();
-        
-        // Extract argument types
-        let args: Vec<serde_json::Value> = ix.args.iter().map(|arg| {
-            let arg_name = arg.name.to_string();
-            let arg_type = extract_type_string(&arg.raw_arg.ty);
-            
-            serde_json::json!({
-                "name": arg_name,
-                "type": arg_type
-            })
-        }).collect();
-        
-        serde_json::json!({
-            "name": name,
-            "accounts": accounts,
-            "args": args
-        })
-    }).collect();
+    generate_idl(&project_root, cli.verbose)?;
     
-    idl["instructions"] = serde_json::Value::Array(instructions);
+    // Get the IDL file path
+    let idl_path = project_root.join("target/idl").join(format!("{}.json", program_name));
     
-    let idl_json = serde_json::to_string_pretty(&idl)
-        .context("Failed to serialize IDL to JSON")?;
+    // If the IDL file doesn't exist, fallback to using output from stderr
+    if !idl_path.exists() {
+        return Err(anyhow!("IDL generation failed. IDL file not found at {}", idl_path.display()));
+    }
     
+    // Read the IDL file
+    let idl_json = fs::read_to_string(&idl_path)
+        .context("Failed to read generated IDL file")?;
+    
+    // Update the program ID in the IDL
+    let mut idl: serde_json::Value = serde_json::from_str(&idl_json)
+        .context("Failed to parse IDL JSON")?;
+    
+    idl["address"] = serde_json::Value::String(program_id);
+    
+    // Write the IDL to the output file
     let output_path = match cli.output {
         Some(path) => path,
-        None => {
-            let target_dir = project_root.join("target/idl");
-            fs::create_dir_all(&target_dir)
-                .context("Failed to create target/idl directory")?;
-            target_dir.join(format!("{}.json", program.name))
-        }
+        None => idl_path,
     };
     
-    write_idl_to_file(&output_path, idl_json)?;
+    let updated_idl_json = serde_json::to_string_pretty(&idl)
+        .context("Failed to serialize IDL to JSON")?;
+    
+    write_idl_to_file(&output_path, updated_idl_json)?;
 
-    println!("IDL generated successfully at {}", output_path.display());
+    if cli.verbose {
+        println!("IDL generated successfully at {}", output_path.display());
+    } else {
+        println!("IDL generated successfully");
+    }
+    
     Ok(())
 }
 
@@ -166,6 +128,14 @@ fn find_project_root() -> Result<PathBuf> {
     }
 }
 
+fn extract_program_name(cargo_toml: &str) -> Result<String> {
+    let regex = regex::Regex::new(r#"name\s*=\s*"([^"]+)""#)?;
+    match regex.captures(cargo_toml) {
+        Some(caps) => Ok(caps[1].to_string()),
+        None => Err(anyhow!("Could not find package name in Cargo.toml")),
+    }
+}
+
 fn extract_program_id(source_code: &str) -> Result<String> {
     let declare_id_line = source_code.lines()
         .find(|line| line.trim().starts_with("declare_id!"))
@@ -179,84 +149,77 @@ fn extract_program_id(source_code: &str) -> Result<String> {
     Ok(declare_id_line[start..end].to_string())
 }
 
-// Helper function to extract type information from Rust types
-fn extract_type_string(ty: &syn::Type) -> String {
-    match ty {
-        syn::Type::Path(type_path) => {
-            let path_string = type_path.path.segments.iter()
-                .map(|segment| segment.ident.to_string())
-                .collect::<Vec<_>>()
-                .join("::");
+fn prepare_for_idl_build(project_root: &Path) -> Result<()> {
+    // Ensure the .cargo directory exists
+    let cargo_dir = project_root.join(".cargo");
+    fs::create_dir_all(&cargo_dir)?;
+    
+    // Create a config.toml file with nightly toolchain
+    let config_content = r#"
+[build]
+rustflags = ["--cfg", "feature=\"idl-build\""]
 
-            // Handle common primitive types
-            match path_string.as_str() {
-                "u8" => "u8".to_string(),
-                "u16" => "u16".to_string(),
-                "u32" => "u32".to_string(),
-                "u64" => "u64".to_string(),
-                "u128" => "u128".to_string(),
-                "i8" => "i8".to_string(),
-                "i16" => "i16".to_string(),
-                "i32" => "i32".to_string(),
-                "i64" => "i64".to_string(),
-                "i128" => "i128".to_string(),
-                "f32" => "f32".to_string(),
-                "f64" => "f64".to_string(),
-                "bool" => "bool".to_string(),
-                "String" => "string".to_string(),
-                "str" => "string".to_string(),
-                "Pubkey" => "publicKey".to_string(),
-                _ => {
-                    // Check for generic types
-                    if let Some(last_segment) = type_path.path.segments.last() {
-                        if last_segment.ident == "Option" {
-                            // Handle Option<T>
-                            if let syn::PathArguments::AngleBracketed(args) = &last_segment.arguments {
-                                if let Some(syn::GenericArgument::Type(inner_type)) = args.args.first() {
-                                    return format!("option<{}>", extract_type_string(inner_type));
-                                }
-                            }
-                        } else if last_segment.ident == "Vec" {
-                            // Handle Vec<T>
-                            if let syn::PathArguments::AngleBracketed(args) = &last_segment.arguments {
-                                if let Some(syn::GenericArgument::Type(inner_type)) = args.args.first() {
-                                    return format!("vec<{}>", extract_type_string(inner_type));
-                                }
-                            }
-                        }
-                    }
-                    
-                    // For other types, just use the last segment as the type name
-                    if let Some(last_segment) = type_path.path.segments.last() {
-                        last_segment.ident.to_string()
-                    } else {
-                        "unknown".to_string()
-                    }
-                }
-            }
-        },
-        syn::Type::Reference(type_ref) => {
-            // For references, extract the inner type
-            extract_type_string(&type_ref.elem)
-        },
-        syn::Type::Array(type_array) => {
-            // Handle arrays like [u8; 32]
-            let elem_type = extract_type_string(&type_array.elem);
-            
-            match &type_array.len {
-                syn::Expr::Lit(lit) => {
-                    if let syn::Lit::Int(int) = &lit.lit {
-                        let size = int.base10_parse::<usize>().unwrap_or(0);
-                        format!("array<{}, {}>", elem_type, size)
-                    } else {
-                        format!("array<{}>", elem_type)
-                    }
-                },
-                _ => format!("array<{}>", elem_type)
-            }
-        },
-        _ => "unknown".to_string()
+[unstable]
+build-std = ["std", "panic_abort"]
+"#;
+    
+    let config_path = cargo_dir.join("config.toml");
+    fs::write(&config_path, config_content)?;
+    
+    Ok(())
+}
+
+fn generate_idl(project_root: &Path, verbose: bool) -> Result<()> {
+    // Set the environment variables needed for IDL generation
+    let env_vars = [
+        ("RUSTFLAGS", "--cfg procmacro2_semver_exempt"),
+        ("CARGO_ENCODED_RUSTFLAGS", "--cfg%20procmacro2_semver_exempt"),
+        ("ANCHOR_IDL_BUILD_RESOLUTION", "TRUE"),
+        ("ANCHOR_IDL_BUILD_SKIP_LINT", "TRUE"),
+        ("RUSTUP_TOOLCHAIN", "nightly"),
+    ];
+    
+    // Create the command
+    let mut command = Command::new("cargo");
+    
+    // Set working directory
+    command.current_dir(project_root);
+    
+    // Set the command
+    command.args([
+        "test", 
+        "__anchor_private_print_idl", 
+        "--features", 
+        "idl-build", 
+        "--", 
+        "--show-output"
+    ]);
+    
+    // Add environment variables
+    for (key, value) in env_vars.iter() {
+        command.env(key, value);
     }
+    
+    // Stdout/stderr handling
+    if verbose {
+        command.stdout(Stdio::inherit());
+        command.stderr(Stdio::inherit());
+    } else {
+        command.stdout(Stdio::null());
+        command.stderr(Stdio::piped());
+    }
+    
+    // Run the command
+    let output = command.output()
+        .context("Failed to execute cargo test for IDL generation")?;
+    
+    // Check if the command was successful
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow!("IDL generation failed: {}", stderr));
+    }
+    
+    Ok(())
 }
 
 fn write_idl_to_file(output_path: &Path, idl_json: String) -> Result<()> {
