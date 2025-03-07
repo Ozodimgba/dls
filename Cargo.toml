@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 authors = ["FX | x.com => @a_ix_d"]
 description = "Lite IDL generator(cli) for non anchor workspaces"
+license = "Apache-2.0"
 
 [dependencies]
 anchor-lang-idl = { version = "0.1.1", features = ["build", "convert"] }
