@@ -1,0 +1,14 @@
+[package]
+name = "dls-anchor"
+version = "0.1.0"
+edition = "2021"
+authors = ["FX | x.com => @a_ix_d"]
+description = "Lite IDL generator(cli) for non anchor workspaces"
+
+[dependencies]
+anchor-lang-idl = { version = "0.1.1", features = ["build", "convert"] }
+clap = { version = "4.4", features = ["derive"] }
+anyhow = "1.0"
+serde_json = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
